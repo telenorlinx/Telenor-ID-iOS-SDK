@@ -18,12 +18,16 @@ public class NetworkService {
     private let refreshAccessTokenGrantType: String = "refresh_token"
 
     // Network requests initiated by SDK must not run on UI thread
-    private let queue = DispatchQueue(
-        label: "Telenor ID SDK Network service queue",
-        qos: .userInitiated,
-        attributes: .concurrent
-    )
-    private let semaphore = DispatchSemaphore(value: 1)
+    private let sessionManager: Session = {
+        //2
+        let configuration = URLSessionConfiguration.af.default
+        //3
+        configuration.timeoutIntervalForRequest = 30
+        configuration.httpMaximumConnectionsPerHost = 1
+        configuration.waitsForConnectivity = true
+        //4
+        return Session(configuration: configuration)
+    }()
 
     // SDK services should be singletones
     private static let shared = NetworkService()
@@ -152,16 +156,13 @@ public class NetworkService {
         code: String?,
         onComplete: @escaping (OperationStatus, String?, Int?, Error?) -> Void
     ) {
-        queue.async {
             guard let code = code else {
                 onComplete(OperationStatus.failure, nil, nil, NetworkServiceError.invalidCode)
                 return
             }
             let (configuration, url) = self.getConfigurationAndUrl(endpoint: Endpoint.token)
 
-            self.semaphore.wait()
-
-            AF.request(
+            sessionManager.request(
                 url,
                 method: .post,
                 parameters: [
@@ -192,7 +193,6 @@ public class NetworkService {
                                 )
                             )
                         } catch {
-                            self.semaphore.signal()
                             onComplete(OperationStatus.failure, nil, statusCode, error)
                             return
                         }
@@ -202,7 +202,6 @@ public class NetworkService {
                             value: accessTokenRequestResponse.expires_in,
                             to: Date()
                         ) else {
-                            self.semaphore.signal()
                             onComplete(
                                 OperationStatus.failure,
                                 nil,
@@ -243,16 +242,13 @@ public class NetworkService {
                                 value: stringExpirationTime
                             )
                         } catch {
-                            self.semaphore.signal()
                             onComplete(OperationStatus.failure, nil, statusCode, error)
                             return
                         }
-                        self.semaphore.signal()
                         onComplete(OperationStatus.success, accessTokenRequestResponse.access_token, statusCode, nil)
                     case .failure(let AFerror):
                         if let data = response.data {
                             let stringResponse = String(data: data, encoding: String.Encoding.utf8)
-                            self.semaphore.signal()
                             onComplete(
                                 OperationStatus.failure,
                                 nil,
@@ -261,7 +257,6 @@ public class NetworkService {
                             )
                             return
                         }
-                        self.semaphore.signal()
                         onComplete(
                             OperationStatus.failure,
                             nil,
@@ -274,25 +269,21 @@ public class NetworkService {
                         ))
                     }
                 }
-        }
+
     }
 
     public func refreshAccessToken(onComplete: @escaping (OperationStatus, String?, Int?, Error?) -> Void) {
-        queue.async {
             let (configuration, url) = self.getConfigurationAndUrl(endpoint: Endpoint.token)
-
-            self.semaphore.wait()
 
             let refreshToken: String
             do {
                 refreshToken = try StorageService.get(item: StorageItem.refreshToken)
             } catch {
-                self.semaphore.signal()
                 onComplete(OperationStatus.failure, nil, nil, error)
                 return
             }
 
-            AF.request(
+        sessionManager.request(
                 url,
                 method: .post,
                 parameters: [
@@ -330,16 +321,13 @@ public class NetworkService {
                         } catch {
                             // In case of any saving had failed - the user will have to try to revoke the
                             // tokens and clean up the local storage
-                            self.semaphore.signal()
                             onComplete(OperationStatus.failure, nil, statusCode, error)
                             return
                         }
-                        self.semaphore.signal()
                         onComplete(OperationStatus.success, refreshTokenRequestResponse.access_token, statusCode, nil)
                     case .failure(let AFerror):
                         if let data = response.data {
                             let stringResponse = String(data: data, encoding: String.Encoding.utf8)
-                            self.semaphore.signal()
                             onComplete(
                                 OperationStatus.failure,
                                 nil,
@@ -348,7 +336,6 @@ public class NetworkService {
                             )
                             return
                         }
-                        self.semaphore.signal()
                         onComplete(OperationStatus.failure, nil, statusCode, NetworkServiceError.unsuccessfulResponse(
                             message: """
                                 Request had failed but provided no extra information.
@@ -357,17 +344,14 @@ public class NetworkService {
                         ))
                     }
                 }
-        }
+
     }
 
     public func logout(
         _ retryOnMissingAccessToken: Bool = false,
         onComplete: @escaping (OperationStatus, String?, Int?, Error?) -> Void
     ) {
-        queue.async {
             let (_, url) = self.getConfigurationAndUrl(endpoint: Endpoint.logout)
-
-            self.semaphore.wait()
 
             var accessToken: String?
             do {
@@ -375,7 +359,6 @@ public class NetworkService {
             } catch {
                 // Access token is missing and that's fine
                 if !retryOnMissingAccessToken {
-                    self.semaphore.signal()
                     onComplete(OperationStatus.failure, nil, nil, NetworkServiceError.accessTokenMissingAtLogout)
                     return
                 }
@@ -383,7 +366,6 @@ public class NetworkService {
 
             guard let accessToken = accessToken else {
                 // If access token is missing during logout attempt - try to refresh it
-                self.semaphore.signal()
                 self.refreshAccessToken { operationStatus, accessToken, _, error in
                     // In refresh was successfull we can make an attempt to
                     if operationStatus == .success && accessToken != nil {
@@ -413,12 +395,11 @@ public class NetworkService {
             }
 
             // If token was present - we proceed to the logout
-            AF.request(url, method: .post, headers: [.authorization(bearerToken: accessToken)]) {
+        sessionManager.request(url, method: .post, headers: [.authorization(bearerToken: accessToken)]) {
                 $0.timeoutInterval = self.timeout
             }
             .validate(statusCode: [200])
             .response { response in
-                self.semaphore.signal()
                 let statusCode = response.response?.statusCode
                 // If refresh token had failed for whatever reason - there is most likely nothing we can do
                 // In that case SDK should try to revoke tokens and clean them afterwards
@@ -438,7 +419,7 @@ public class NetworkService {
                 // When wipe is done - report back that everything went okay
                 onComplete(OperationStatus.success, nil, statusCode, nil)
             }
-        }
+
     }
 
     // Revoking a token makes sure that the token can no longer be used.
@@ -448,21 +429,19 @@ public class NetworkService {
         tokenType: StorageItem,
         onComplete: @escaping (OperationStatus, String?, Int?, Error?) -> Void
     ) {
-        queue.async {
+
             let (configuration, url) = self.getConfigurationAndUrl(endpoint: Endpoint.revoke)
 
-            self.semaphore.wait()
             var token: String
             do {
                 token = try StorageService.get(item: tokenType)
             } catch {
                 // Token cannot be revoked because it's missing
-                self.semaphore.signal()
                 onComplete(OperationStatus.failure, nil, nil, error)
                 return
             }
 
-            AF.request(
+        sessionManager.request(
                 url,
                 method: .post,
                 parameters: [
@@ -478,15 +457,13 @@ public class NetworkService {
                         try StorageService.delete(item: tokenType)
                     } catch {
                         // Delete failed, user has to ensure tokens are gone.
-                        self.semaphore.signal()
                         onComplete(OperationStatus.failure, nil, statusCode, error)
                         return
                     }
                     // All good.
-                    self.semaphore.signal()
                     onComplete(OperationStatus.success, nil, statusCode, nil)
                 }
-        }
+
     }
 
     private func createRandomState() -> String {
