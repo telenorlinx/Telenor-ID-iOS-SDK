@@ -306,6 +306,29 @@ public class NetworkService {
                     let statusCode = response.response?.statusCode
                     switch response.result {
                     case .success(let refreshTokenRequestResponse):
+                        guard let expirationTime = Calendar.current.date(
+                            byAdding: .second,
+                            value: refreshTokenRequestResponse.expires_in,
+                            to: Date()
+                        ) else {
+                            self.semaphore.signal()
+                            onComplete(
+                                OperationStatus.failure,
+                                nil,
+                                statusCode,
+                                NetworkServiceError.unsuccessfulResponse(
+                                    message: """
+                                        SDK was unable to set the access token expiration date
+                                        after token refresh
+                                    """
+                                )
+                            )
+                            return
+                        }
+
+                        let dateFormatter = DateFormatter()
+                        dateFormatter.dateFormat = "YY, MMM d, HH:mm:ss"
+                        let stringExpirationTime = dateFormatter.string(from: expirationTime)
                         do {
                             try StorageService.save(
                                 item: StorageItem.accessToken,
@@ -325,7 +348,7 @@ public class NetworkService {
                             )
                             try StorageService.save(
                                 item: StorageItem.expiresIn,
-                                value: String(refreshTokenRequestResponse.expires_in)
+                                value: stringExpirationTime
                             )
                         } catch {
                             // In case of any saving had failed - the user will have to try to revoke the
