@@ -31,7 +31,7 @@ public enum TelenorIdSdk {
                 Call `TelenorIdSdk.useConfiguration()` before accessing shared instance.
             """)
         }
-        var urlComponents = Endpoint.selfService(configuration)
+        var urlComponents = Host.getSelfServiceUrlComponents(environment: configuration.environment)
         urlComponents.queryItems = [
             URLQueryItem(name: Parameter.uiLocales(), value: uiLocales.joined(separator: " "))
         ]

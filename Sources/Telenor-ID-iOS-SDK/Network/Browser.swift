@@ -10,67 +10,44 @@ class Browser: NSObject, SFSafariViewControllerDelegate {
     }
 
     func launch(
+        scope: Set<String>,
+        codeVerifier: String,
         url: URL,
         viewControllerContext: Any?,
         state: String?,
         onComplete: @escaping (OperationStatus, String?, Int?, Error?) -> Void
     ) {
-        if #available(iOS 12.0, *) {
-            let authenticationSession = ASWebAuthenticationSession(
-                url: url,
-                callbackURLScheme: configuration.callbackUrlScheme) { (successUrl: URL?, error: Error?) in
-                    self.handleCallback(
-                        successUrl: successUrl,
-                        error: error,
-                        state: state,
-                        onComplete: onComplete)
-            }
-
-            if #available(iOS 13.0, *) {
-                // As there is support for versions below 13 now, this way of providing the
-                // swiftlint:disable force_cast
-                if viewControllerContext is ASWebAuthenticationPresentationContextProviding {
-                    authenticationSession.presentationContextProvider = (
-                        viewControllerContext as! ASWebAuthenticationPresentationContextProviding
-                    )
-                } else {
-                    fatalError("""
-                        iOS 13 and higher requires to provide view controller,
-                        that implements ASWebAuthenticationPresentationContextProviding protocol
-                    """)
-                }
-            }
-            authenticationSession.start()
-            return
+        let authenticationSession = ASWebAuthenticationSession(
+            url: url,
+            callbackURLScheme: configuration.callbackUrlScheme) { (successUrl: URL?, error: Error?) in
+                self.handleCallback(
+                    scope: scope,
+                    codeVerifier: codeVerifier,
+                    successUrl: successUrl,
+                    error: error,
+                    state: state,
+                    onComplete: onComplete)
         }
 
-        // The drop of older versions support should be considered
-        if #available(iOS 11.0, *) {
-            let authenticationSession = SFAuthenticationSession(
-                url: url,
-                callbackURLScheme: configuration.callbackUrlScheme) { (successUrl: URL?, error: Error?) in
-                    self.handleCallback(
-                        successUrl: successUrl,
-                        error: error,
-                        state: state,
-                        onComplete: onComplete)
-            }
-
-            authenticationSession.start()
-            return
+        // As there is support for versions below 13 now, this way of providing the
+        // swiftlint:disable force_cast
+        if viewControllerContext is ASWebAuthenticationPresentationContextProviding {
+            authenticationSession.presentationContextProvider = (
+                viewControllerContext as! ASWebAuthenticationPresentationContextProviding
+            )
+        } else {
+            fatalError("""
+                iOS 13 and higher requires to provide view controller,
+                that implements ASWebAuthenticationPresentationContextProviding protocol
+            """)
         }
-
-        if #available(iOS 9.0, *) {
-            let safariViewController = SFSafariViewController(url: url as URL)
-            safariViewController.delegate = self
-            UIApplication.shared.tdcTopViewController?.present(safariViewController, animated: true, completion: nil)
-            return
-        }
-
-        UIApplication.shared.open(url as URL)
+        
+        authenticationSession.start()
     }
 
     private func handleCallback(
+        scope: Set<String>,
+        codeVerifier: String,
         successUrl: URL?,
         error: Error?,
         state: String?,
@@ -118,7 +95,12 @@ class Browser: NSObject, SFSafariViewControllerDelegate {
             return
         }
 
-        TelenorIdSdk.networkService().getAccessToken(code: code, onComplete: onComplete)
+        TelenorIdSdk.networkService().getAccessToken(
+            scope: scope,
+            codeVerifier: codeVerifier,
+            code: code,
+            onComplete: onComplete
+        )
     }
 
     private func executeOnComplete(
@@ -126,13 +108,10 @@ class Browser: NSObject, SFSafariViewControllerDelegate {
         error: Error?,
         onComplete: @escaping (OperationStatus, String?, Int?, Error?) -> Void
     ) {
-        if #available(iOS 9.0, *) {
-            UIApplication.shared.tdcTopViewController?.dismiss(animated: true) {
-                onComplete(operationStatus, nil, nil, error)
-            }
-            return
+        UIApplication.shared.tdcTopViewController?.dismiss(animated: true) {
+            onComplete(operationStatus, nil, nil, error)
         }
-        onComplete(operationStatus, nil, nil, error)
+        return
     }
 
     private func getParameter(url: URLComponents, parameter: Parameter) -> String? {
