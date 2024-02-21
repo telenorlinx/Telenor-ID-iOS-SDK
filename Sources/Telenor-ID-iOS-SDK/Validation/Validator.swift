@@ -36,33 +36,13 @@ public enum Validator {
             """)
         }
 
-        guard let audience = token["aud"] as? [String] else {
+        guard let audience = token["aud"] as? String else {
             throw IdTokenValidationError.missingAudience("ID token audience was nil.")
         }
 
-        if !audience.contains(expectedAudience) {
+        if audience != expectedAudience {
             throw IdTokenValidationError.missingAudience("""
                 ID token audience list does not contain the configured client ID.
-            """)
-        }
-
-        let untrustedAudiences = audience.filter { (str: String) -> Bool in
-            str != expectedAudience
-        }
-        if !untrustedAudiences.isEmpty {
-            throw IdTokenValidationError.untrustedAudiences("ID token audience list contains untrusted audiences.")
-        }
-
-        let authorizedParty: String? = token["azp"] as? String
-        if audience.count > 1 && authorizedParty == nil {
-            throw IdTokenValidationError.authorizedPartyMissing("""
-                ID token contains multiple audiences but no azp claim is present.
-            """)
-        }
-
-        if audience.count > 1 && authorizedParty != expectedAudience {
-            throw IdTokenValidationError.authorizedPartyMismatch("""
-                ID token authorized party is not the configured client ID.
             """)
         }
 

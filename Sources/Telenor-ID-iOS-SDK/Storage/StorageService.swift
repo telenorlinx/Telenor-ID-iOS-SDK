@@ -15,8 +15,8 @@ public class StorageService {
     public static func get(item: StorageItem) throws -> String {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: getLegacyAccountName(item: item) ?? item.getAccountName(),
-            kSecAttrService as String: self.legacyTag ?? tag,
+            kSecAttrAccount as String: getAccountName(item: item),
+            kSecAttrService as String: getTag(item: item),
             kSecMatchLimit as String: kSecMatchLimitOne,
             kSecReturnAttributes as String: true,
             kSecReturnData as String: true
@@ -38,8 +38,8 @@ public class StorageService {
     public static func delete(item: StorageItem) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: getLegacyAccountName(item: item) ?? item.getAccountName(),
-            kSecAttrService as String: self.legacyTag ?? tag,
+            kSecAttrAccount as String: getAccountName(item: item),
+            kSecAttrService as String: getTag(item: item),
         ]
 
         let status = SecItemDelete(query as CFDictionary)
@@ -66,16 +66,28 @@ public class StorageService {
             }
         }
     }
+    
+    public static func wipeLegacyTokens() throws {
+        for item in StorageItem.allCases {
+            do {
+                try delete(item: item)
+            } catch StorageServiceError.messageException(let description) {
+                throw StorageServiceError.messageException(description: description)
+            } catch {
+                throw error
+            }
+        }
+    }
 
-    public static func save(item: StorageItem, value: String) throws {
+    public static func save(item: StorageItem, value: String, useLegacy: Bool = false) throws {
         guard let data = value.data(using: .utf8) else {
             throw StorageServiceError.messageException(description: "Error in saving \(item) - corrupted data")
         }
 
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: getLegacyAccountName(item: item) ?? item.getAccountName(),
-            kSecAttrService as String: self.legacyTag ?? tag,
+            kSecAttrAccount as String: getAccountName(item: item),
+            kSecAttrService as String: getTag(item: item),
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             kSecValueData as String: data
         ]
@@ -120,6 +132,14 @@ public class StorageService {
         }
 
         return value
+    }
+    
+    private static func getAccountName(item: StorageItem) -> String {
+        return getLegacyAccountName(item: item) ?? item.getAccountName()
+    }
+    
+    private static func getTag(item: StorageItem) -> String {
+        return self.legacyTag ?? tag
     }
 
     private static func getLegacyAccountName(item: StorageItem) -> String? {

@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import Alamofire
 import UIKit
 
@@ -16,6 +17,9 @@ public class NetworkService {
     // SDK requires specific values passed as grant types to relevant requests
     private let getAccessTokenGrantType: String = "authorization_code"
     private let refreshAccessTokenGrantType: String = "refresh_token"
+    
+    // SDK requires specific challenge method for code_challenge
+    private let codeChallengeMethod: String = "S256"
 
     // Network requests initiated by SDK must not run on UI thread
     private let queue = DispatchQueue(
@@ -47,7 +51,7 @@ public class NetworkService {
         scope: Set<String>,
         state: String? = nil,
         prompt: Prompt? = nil,
-        acrValues: Set<Int>? = nil,
+        acrValues: Set<String>? = nil,
         maxAge: Int? = nil,
         loginHints: Set<String>? = nil,
         logSessionId: UUID? = nil,
@@ -62,8 +66,19 @@ public class NetworkService {
                 Use `.useConfiguration()` before accessing shared instance.
             """)
         }
+        
+        let codeVerifier = createRandomString()
+        guard let codeVerifierData = codeVerifier.data(using: .ascii) else {
+            // This should never happen
+            fatalError("""
+                SDK was not able to generate code challenge for authentication request.
+            """)
+        }
+
         var urlComponents = Endpoint.authorization(configuration)
         urlComponents.queryItems = [
+            URLQueryItem(name: Parameter.codeChallenge(), value: SHA256.hash(data: codeVerifierData).data.base64urlEncodedString()),
+            URLQueryItem(name: Parameter.codeChallengeMethod(), value: codeChallengeMethod),
             URLQueryItem(name: Parameter.responseType(), value: responseType),
             URLQueryItem(name: Parameter.clientId(), value: configuration.clientId),
             URLQueryItem(name: Parameter.redirectUri(), value: configuration.redirectUrl),
@@ -80,7 +95,7 @@ public class NetworkService {
 
         // State is required to validate the response, however it's not uncommon that client application doesn't hold
         // that information. In that case the random state will be generated and provided by SDK itself.
-        let nonEmptyState = state ?? createRandomState()
+        let nonEmptyState = state ?? createRandomString()
         urlComponents.queryItems?.append(URLQueryItem(name: Parameter.state(), value: nonEmptyState))
 
         if let prompt = prompt {
@@ -141,6 +156,8 @@ public class NetworkService {
         }
 
         Browser(configuration).launch(
+            scope: scope,
+            codeVerifier: codeVerifier,
             url: url,
             viewControllerContext: viewControllerContext,
             state: nonEmptyState,
@@ -149,6 +166,8 @@ public class NetworkService {
 
     // This API is tightly connected to autorize method and should not be public
     func getAccessToken(
+        scope: Set<String>,
+        codeVerifier: String,
         code: String?,
         onComplete: @escaping (OperationStatus, String?, Int?, Error?) -> Void
     ) {
@@ -160,11 +179,12 @@ public class NetworkService {
             let (configuration, url) = self.getConfigurationAndUrl(endpoint: Endpoint.token)
 
             self.semaphore.wait()
-
             AF.request(
                 url,
                 method: .post,
                 parameters: [
+                    Parameter.codeVerifier(): codeVerifier,
+                    Parameter.scope(): scope.joined(separator: " "),
                     Parameter.grantType(): self.getAccessTokenGrantType,
                     Parameter.code(): code,
                     Parameter.clientId(): configuration.clientId,
@@ -277,9 +297,11 @@ public class NetworkService {
         }
     }
 
-    public func refreshAccessToken(onComplete: @escaping (OperationStatus, String?, Int?, Error?) -> Void) {
+    public func refreshAccessToken(onComplete: @escaping (OperationStatus, String?, Int?, Error?) -> Void, useTelenorIdEndpoint: Bool = false) {
         queue.async {
-            let (configuration, url) = self.getConfigurationAndUrl(endpoint: Endpoint.token)
+            let (configuration, url) = useTelenorIdEndpoint
+            ? self.getLegacyConfigurationAndTokenRefreshUrl()
+            : self.getConfigurationAndUrl(endpoint: Endpoint.token)
 
             self.semaphore.wait()
 
@@ -384,7 +406,6 @@ public class NetworkService {
     }
 
     public func logout(
-        _ retryOnMissingAccessToken: Bool = false,
         onComplete: @escaping (OperationStatus, String?, Int?, Error?) -> Void
     ) {
         queue.async {
@@ -392,19 +413,17 @@ public class NetworkService {
 
             self.semaphore.wait()
 
-            var accessToken: String?
+            var idToken: String?
             do {
-                accessToken = try StorageService.get(item: StorageItem.accessToken)
+                idToken = try StorageService.get(item: StorageItem.idToken)
             } catch {
                 // Access token is missing and that's fine
-                if !retryOnMissingAccessToken {
-                    self.semaphore.signal()
-                    onComplete(OperationStatus.failure, nil, nil, NetworkServiceError.accessTokenMissingAtLogout)
-                    return
-                }
+                self.semaphore.signal()
+                onComplete(OperationStatus.failure, nil, nil, NetworkServiceError.idTokenMissingAtLogout)
+                return
             }
 
-            guard let accessToken = accessToken else {
+            guard let idToken = idToken else {
                 // If access token is missing during logout attempt - try to refresh it
                 self.semaphore.signal()
                 self.refreshAccessToken { operationStatus, accessToken, _, error in
@@ -436,10 +455,12 @@ public class NetworkService {
             }
 
             // If token was present - we proceed to the logout
-            AF.request(url, method: .post, headers: [.authorization(bearerToken: accessToken)]) {
+            AF.request(url, method: .post, parameters: [
+                Parameter.idTokenHint(): idToken
+            ]) {
                 $0.timeoutInterval = self.timeout
             }
-            .validate(statusCode: [200])
+            .validate(statusCode: [200, 204])
             .response { response in
                 self.semaphore.signal()
                 let statusCode = response.response?.statusCode
@@ -467,10 +488,14 @@ public class NetworkService {
     // Revoking a token makes sure that the token can no longer be used.
     // The access token and refresh token known to the client should be deleted from client storage
     // and provided to this revoke endpoint when the tokens are no longer needed.
-    public func revokeToken(
+    //
+    // TODO: Revoke token endpoint is not supported in ID+ for now.
+    private func revokeToken(
         tokenType: StorageItem,
         onComplete: @escaping (OperationStatus, String?, Int?, Error?) -> Void
     ) {
+        return;
+        /*
         queue.async {
             let (configuration, url) = self.getConfigurationAndUrl(endpoint: Endpoint.revoke)
 
@@ -510,11 +535,7 @@ public class NetworkService {
                     onComplete(OperationStatus.success, nil, statusCode, nil)
                 }
         }
-    }
-
-    private func createRandomState() -> String {
-        let letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-        return String((0 ..< 64).map { _ in letters.randomElement() ?? Character("") })
+         */
     }
 
     private func parseDateHeader(dateHeader: String?) -> Date? {
@@ -546,6 +567,25 @@ public class NetworkService {
         let urlComponents = endpoint(configuration)
         guard let url = urlComponents.url else {
             fatalError("An error occured when generating the url at logout() method.")
+        }
+        return (configuration, url)
+    }
+    
+    private func getLegacyConfigurationAndTokenRefreshUrl() -> (Configuration, URL) {
+        guard let configuration = NetworkService.configuration else {
+            fatalError("""
+                You must provide configuration before accessing NetworkService.
+                Use `.useConfiguration()` before accessing shared instance.
+            """)
+        }
+        
+        var urlComponents = URLComponents()
+        urlComponents.scheme = "https"
+        urlComponents.host = Host.getLegacyIdHost(environment: configuration.environment)
+        urlComponents.path = "/oauth/token"
+        
+        guard let url = urlComponents.url else {
+            fatalError("An error occured when generating the url at getLegacyConfigurationAndTokenRefreshUrl() method.")
         }
         return (configuration, url)
     }
