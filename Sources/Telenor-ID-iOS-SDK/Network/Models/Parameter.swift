@@ -24,7 +24,11 @@ enum Parameter: String, Encodable {
         telenordigitalSdkVersion = "telenordigital_sdk_version",
         telenordigitalDid = "telenordigital_did",
         logSessionId = "log_session_id",
-        token = "token"
+        token = "token",
+        codeChallenge = "code_challenge",
+        codeChallengeMethod = "code_challenge_method",
+        codeVerifier = "code_verifier",
+        idTokenHint = "id_token_hint"
 
     func callAsFunction() -> String {
         return self.rawValue
