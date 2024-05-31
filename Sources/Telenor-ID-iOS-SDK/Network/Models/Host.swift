@@ -1,6 +1,6 @@
 import Foundation
 
-enum Host: String {
+public enum Host: String {
     case idProduction = "id.telenor.no",
         idStaging = "id-test.telenor.no",
         selfServiceProduction = "manage.telenorid.com",
